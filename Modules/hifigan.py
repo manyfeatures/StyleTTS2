@@ -460,33 +460,45 @@ class Decoder(nn.Module):
         
         #x = torch.cat([asr, F0, N], axis=1)
 
-# inside Generator.forward(self, asr, F0_curve, N, s):  # names may vary
+# inside Generator.forward(self, asr, F0_curve, N, s):
 
-        def _to_ncl(x):
-            # Normalize to [B, 1, T] for Conv1d
-            if x.dim() == 2:                    # [B, T]
-                return x.unsqueeze(1)           # -> [B,1,T]
-            if x.dim() == 3 and x.shape[-1] == 1:  # [B,T,1]
-                return x.transpose(1, 2)        # -> [B,1,T]
-            return x                            # assume already [B,1,T]
-
-        # Main stream must be channel-first too
-        if asr.dim() == 3 and asr.shape[2] < asr.shape[1]:
-            # If someone passed [B,T,C], flip to [B,C,T]
+        def _to_ncl(x: torch.Tensor) -> torch.Tensor:
+            # Goal: return [B, 1, T] for Conv1d regardless of input shape
+            if x.dim() == 1:                      # [T]
+                x = x.unsqueeze(0).unsqueeze(0)   # -> [1,1,T]
+                return x
+            if x.dim() == 2:                      # [B,T] (common)
+                return x.unsqueeze(1)             # -> [B,1,T]
+            if x.dim() == 3:
+                if x.shape[1] == 1:               # [B,1,T]
+                    return x
+                if x.shape[-1] == 1:              # [B,T,1]
+                    return x.transpose(1, 2)      # -> [B,1,T]
+                # Unexpected extra features; collapse to a single channel
+                # e.g., [B,T,C] or [B,C,T] -> mean to one channel over feature dim
+                if x.shape[-1] < x.shape[1]:      # likely [B,C,T]; C>1
+                    x = x.mean(dim=1, keepdim=True)       # -> [B,1,T]
+                else:                              # likely [B,T,C]
+                    x = x.mean(dim=-1, keepdim=True)      # -> [B,T,1]
+                    x = x.transpose(1, 2)                  # -> [B,1,T]
+                return x
+            # Fallback
+            return x
+        
+        # Ensure main stream is channel-first [B,C,T]
+        if asr.dim() == 3 and asr.shape[2] < asr.shape[1]:  # [B,T,C] -> [B,C,T]
             asr = asr.transpose(1, 2)
-
-        # Replace the old lines with these
+        
         F0_feat = self.F0_conv(_to_ncl(F0_curve))
         N_feat  = self.N_conv(_to_ncl(N))
-
-        # Align time lengths just in case
+        
+        # Length guard (safe concat)
         T = min(asr.shape[-1], F0_feat.shape[-1], N_feat.shape[-1])
-        asr     = asr[..., :T]
-        F0_feat = F0_feat[..., :T]
-        N_feat  = N_feat[..., :T]
-
-        # Concatenate along channels (use dim=1, not axis=1)
+        asr, F0_feat, N_feat = asr[..., :T], F0_feat[..., :T], N_feat[..., :T]
+        
+        # NOTE: use dim=1 (not axis)
         x = torch.cat([asr, F0_feat, N_feat], dim=1)
+
 
         x = self.encode(x, s)
         
