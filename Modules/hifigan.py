@@ -455,10 +455,25 @@ class Decoder(nn.Module):
                 N = nn.functional.conv1d(N.unsqueeze(1), torch.ones(1, 1, N_down).to('cuda'), padding=N_down//2).squeeze(1)  / N_down
 
         
-        F0 = self.F0_conv(F0_curve.unsqueeze(1))
-        N = self.N_conv(N.unsqueeze(1))
+        #F0 = self.F0_conv(F0_curve.unsqueeze(1))
+        #N = self.N_conv(N.unsqueeze(1))
         
-        x = torch.cat([asr, F0, N], axis=1)
+        #x = torch.cat([asr, F0, N], axis=1)
+
+        def _to_ncl(x):
+            # Accept [B,T], [B,T,1], or [B,1,T]; return [B,1,T] for Conv1d
+            if x.dim() == 2:                # [B, T]
+                return x.unsqueeze(1)       # -> [B, 1, T]
+            if x.dim() == 3 and x.shape[-1] == 1:  # [B, T, 1]
+                return x.transpose(1, 2)    # -> [B, 1, T]
+            return x                        # assume already [B, 1, T]
+
+        F0 = self.F0_conv(_to_ncl(F0_curve))
+        N  = self.N_conv(_to_ncl(N))
+        x  = torch.cat([asr, F0, N], dim=1)
+
+
+
         x = self.encode(x, s)
         
         asr_res = self.asr_res(asr)
