@@ -460,19 +460,33 @@ class Decoder(nn.Module):
         
         #x = torch.cat([asr, F0, N], axis=1)
 
+# inside Generator.forward(self, asr, F0_curve, N, s):  # names may vary
+
         def _to_ncl(x):
-            # Accept [B,T], [B,T,1], or [B,1,T]; return [B,1,T] for Conv1d
-            if x.dim() == 2:                # [B, T]
-                return x.unsqueeze(1)       # -> [B, 1, T]
-            if x.dim() == 3 and x.shape[-1] == 1:  # [B, T, 1]
-                return x.transpose(1, 2)    # -> [B, 1, T]
-            return x                        # assume already [B, 1, T]
+            # Normalize to [B, 1, T] for Conv1d
+            if x.dim() == 2:                    # [B, T]
+                return x.unsqueeze(1)           # -> [B,1,T]
+            if x.dim() == 3 and x.shape[-1] == 1:  # [B,T,1]
+                return x.transpose(1, 2)        # -> [B,1,T]
+            return x                            # assume already [B,1,T]
 
-        F0 = self.F0_conv(_to_ncl(F0_curve))
-        N  = self.N_conv(_to_ncl(N))
-        x  = torch.cat([asr, F0, N], dim=1)
+        # Main stream must be channel-first too
+        if asr.dim() == 3 and asr.shape[2] < asr.shape[1]:
+            # If someone passed [B,T,C], flip to [B,C,T]
+            asr = asr.transpose(1, 2)
 
+        # Replace the old lines with these
+        F0_feat = self.F0_conv(_to_ncl(F0_curve))
+        N_feat  = self.N_conv(_to_ncl(N))
 
+        # Align time lengths just in case
+        T = min(asr.shape[-1], F0_feat.shape[-1], N_feat.shape[-1])
+        asr     = asr[..., :T]
+        F0_feat = F0_feat[..., :T]
+        N_feat  = N_feat[..., :T]
+
+        # Concatenate along channels (use dim=1, not axis=1)
+        x = torch.cat([asr, F0_feat, N_feat], dim=1)
 
         x = self.encode(x, s)
         
