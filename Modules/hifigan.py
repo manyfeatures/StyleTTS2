@@ -463,43 +463,36 @@ class Decoder(nn.Module):
 # inside Generator.forward(self, asr, F0_curve, N, s):
 
         def _to_ncl(x: torch.Tensor) -> torch.Tensor:
-            # Goal: return [B, 1, T] for Conv1d regardless of input shape
+            # Normalize to [B, 1, T] for Conv1d (handles [T], [B,T], [B,T,1], [B,1,T])
             if x.dim() == 1:                      # [T]
-                x = x.unsqueeze(0).unsqueeze(0)   # -> [1,1,T]
-                return x
-            if x.dim() == 2:                      # [B,T] (common)
+                return x.unsqueeze(0).unsqueeze(0)
+            if x.dim() == 2:                      # [B,T]
                 return x.unsqueeze(1)             # -> [B,1,T]
-            if x.dim() == 3:
-                if x.shape[1] == 1:               # [B,1,T]
-                    return x
-                if x.shape[-1] == 1:              # [B,T,1]
-                    return x.transpose(1, 2)      # -> [B,1,T]
-                # Unexpected extra features; collapse to a single channel
-                # e.g., [B,T,C] or [B,C,T] -> mean to one channel over feature dim
-                if x.shape[-1] < x.shape[1]:      # likely [B,C,T]; C>1
-                    x = x.mean(dim=1, keepdim=True)       # -> [B,1,T]
-                else:                              # likely [B,T,C]
-                    x = x.mean(dim=-1, keepdim=True)      # -> [B,T,1]
-                    x = x.transpose(1, 2)                  # -> [B,1,T]
-                return x
-            # Fallback
-            return x
-        
+            if x.dim() == 3 and x.shape[-1] == 1: # [B,T,1]
+                return x.transpose(1, 2)          # -> [B,1,T]
+            return x                               # assume [B,1,T] or [B,C,T]
+
         # Ensure main stream is channel-first [B,C,T]
         if asr.dim() == 3 and asr.shape[2] < asr.shape[1]:  # [B,T,C] -> [B,C,T]
             asr = asr.transpose(1, 2)
-        
-        F0_feat = self.F0_conv(_to_ncl(F0_curve))
-        N_feat  = self.N_conv(_to_ncl(N))
-        
-        # Length guard (safe concat)
+
+        # 1) Convolve F0 and N
+        F0_feat = self.F0_conv(_to_ncl(F0_curve))   # typically [B,1,T]
+        N_feat  = self.N_conv(_to_ncl(N))           # typically [B,1,T]
+
+        # 2) Time alignment
         T = min(asr.shape[-1], F0_feat.shape[-1], N_feat.shape[-1])
         asr, F0_feat, N_feat = asr[..., :T], F0_feat[..., :T], N_feat[..., :T]
-        
-        # NOTE: use dim=1 (not axis)
-        x = torch.cat([asr, F0_feat, N_feat], dim=1)
 
+        # 3) KEEP CHANNEL COUNT == asr.size(1) (80).  Broadcast-add instead of concat.
+        C = asr.shape[1]  # should be 80
+        if F0_feat.shape[1] == 1:
+            F0_feat = F0_feat.expand(-1, C, -1)    # [B,1,T] -> [B,80,T]
+        if N_feat.shape[1] == 1:
+            N_feat  = N_feat.expand(-1, C, -1)     # [B,1,T] -> [B,80,T]
 
+        x = asr + F0_feat + N_feat                  # <- NOT torch.cat
+        # then:
         x = self.encode(x, s)
         
         asr_res = self.asr_res(asr)
